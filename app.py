@@ -13,10 +13,23 @@ import datetime
 from spellchecker import SpellChecker
 
 # ---- NLTK Data Setup ----
-nltk_data_dir = os.path.expanduser("~/.nltk_data")
-if not os.path.exists(os.path.join(nltk_data_dir, "corpora", "brown")) or not os.path.exists(os.path.join(nltk_data_dir, "corpora", "words")):
-    nltk.download('brown', download_dir=nltk_data_dir)
-    nltk.download('words', download_dir=nltk_data_dir)
+nltk_data_dir = "/home/appuser/nltk_data"  # Persistent directory for Streamlit Cloud
+os.makedirs(nltk_data_dir, exist_ok=True)  # Create directory if it doesn't exist
+nltk.data.path.append(nltk_data_dir)  # Append custom path to NLTK's data path
+
+# Download NLTK corpora if not already present
+try:
+    nltk.corpus.words.words()  # Try accessing the words corpus
+    nltk.corpus.brown.words()  # Try accessing the brown corpus
+except LookupError:
+    try:
+        nltk.download('words', download_dir=nltk_data_dir, quiet=True)
+        nltk.download('brown', download_dir=nltk_data_dir, quiet=True)
+    except Exception as e:
+        st.error(f"Failed to download NLTK data: {str(e)}. Please check your network or contact support.")
+        st.stop()
+
+# Load vocabularies
 english_vocab = set(w.lower() for w in nltk.corpus.words.words())
 brown_vocab = set(w.lower() for w in nltk.corpus.brown.words())
 
@@ -64,7 +77,6 @@ def init_spell_checker():
 spell = init_spell_checker()
 
 # Custom lists
-
 STOPWORDS = {'Hassan', 'Asim', 'Ather'}
 
 def looks_like_gibberish(word):
@@ -199,7 +211,7 @@ if st.session_state.phase in ["Block_1", "Block_2", "Block_3", "Block_4"]:
     
     # Display badges
     if len(st.session_state.used_texts) >= 10 and "10 Responses" not in st.session_state.badges:
-        st.session_state.badges.append("10 Responses")
+        st.session_state.badges.append("10 Responses underlying")
         st.success("🏅 Badge Earned: 10 Responses!")
     if st.session_state.step >= total_words and f"Level {level[-1]} Master" not in st.session_state.badges:
         st.session_state.badges.append(f"Level {level[-1]} Master")
