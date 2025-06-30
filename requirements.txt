@@ -1,0 +1,11 @@
+streamlit
+pandas
+matplotlib
+transformers
+torch    # 🔍 Added this line to fix the model loading error
+nltk
+gspread
+google-auth
+pyspellchecker
+openpyxl
+oauth2client
