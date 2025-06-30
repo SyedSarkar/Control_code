@@ -5,7 +5,6 @@ import pandas as pd
 import re
 import random
 import time
-from transformers.pipelines import pipeline
 import nltk
 from nltk.corpus import brown, words
 import gspread
@@ -13,9 +12,16 @@ from google.oauth2.service_account import Credentials
 import datetime
 from spellchecker import SpellChecker
 
+# ---- NLTK Data Setup ----
+nltk_data_dir = os.path.expanduser("~/.nltk_data")
+if not os.path.exists(os.path.join(nltk_data_dir, "corpora", "brown")) or not os.path.exists(os.path.join(nltk_data_dir, "corpora", "words")):
+    nltk.download('brown', download_dir=nltk_data_dir)
+    nltk.download('words', download_dir=nltk_data_dir)
+english_vocab = set(w.lower() for w in nltk.corpus.words.words())
+brown_vocab = set(w.lower() for w in nltk.corpus.brown.words())
+
 # ---- Google Sheets Setup ----
-HEADERS = ["timestamp", "user", "specific_id", "phase", "cue", "sentence", "response", "sentiment",
-           "confidence", "score", "response_time_sec", "accepted"]
+HEADERS = ["timestamp", "user", "specific_id", "phase", "cue", "response", "score", "response_time_sec", "accepted"]
 
 @st.cache_resource
 def connect_to_sheet():
@@ -28,27 +34,27 @@ def connect_to_sheet():
         ]
     )
     client = gspread.authorize(creds)
-    return client.open("Intervention_Results").sheet1
+    return client.open("Control_results").sheet1
 
 def log_to_gsheet(row_dict):
-    sheet = connect_to_sheet()
-    row = [str(row_dict.get(col, "")) for col in HEADERS]
-    sheet.append_row(row)
-# ----------------------------------
-# Download NLTK resources
-nltk.download('brown')
-nltk.download('words')
-english_vocab = set(w.lower() for w in words.words())  # Use NLTK words corpus
-brown_vocab = set(w.lower() for w in brown.words())
+    try:
+        sheet = connect_to_sheet()
+        row = [str(row_dict.get(col, "")) for col in HEADERS]
+        sheet.append_row(row[:len(HEADERS)])
+    except Exception as e:
+        st.error(f"Failed to log to Google Sheets: {str(e)}. Retrying in 5 seconds...")
+        time.sleep(5)
+        try:
+            sheet.append_row(row[:len(HEADERS)])
+        except Exception as e:
+            st.error(f"Logging failed again: {str(e)}. Data saved locally only.")
 
-# Custom list of valid hyphenated words
+# ----------------------------------
 VALID_HYPHENATED_WORDS = {
     "self-aware", "well-being", "self-esteem", "self-confidence", "self-assured",
     "well-adjusted", "high-spirited", "self-reliant", "self-worth", "well-intentioned"
 }
-
-STOPWORDS = {'Hassan', 'Asim', 'Ather'}
-
+# Spell Checker Setup
 @st.cache_resource
 def init_spell_checker():
     checker = SpellChecker()
@@ -57,17 +63,18 @@ def init_spell_checker():
 
 spell = init_spell_checker()
 
+# Custom lists
+
+STOPWORDS = {'Hassan', 'Asim', 'Ather'}
+
 def looks_like_gibberish(word):
-    # Handle hyphenated words
     if '-' in word:
         if word.lower() in spell:
             return False
         parts = word.lower().split('-')
-        if len(parts) != 2:  # Allow only one hyphen
+        if len(parts) != 2:
             return True
         return not all(part.isalpha() for part in parts)
-    
-    # Standard gibberish checks for non-hyphenated words
     return (
         len(word) < 1 or
         not word.isalpha() or
@@ -81,17 +88,15 @@ def is_valid_response(response, cue_word):
     if cue_word is None:
         return False
     tokens = [response.strip()] if '-' in response else response.lower().strip().split()
-    if len(tokens) != 1:  # Enforce single-word response (including hyphenated)
+    if len(tokens) != 1:
         return False
     token = tokens[0].lower()
     if token == cue_word.lower() or token in STOPWORDS or looks_like_gibberish(token):
         return False
     return token in spell or token in english_vocab
 
-def calculate_score(label):
-    if label == "POSITIVE": return 2
-    if label == "NEGATIVE": return -1
-    return 1
+def calculate_score():
+    return 1  # Fixed score for valid responses
 
 def format_cue_word(cue):
     return f"""
@@ -112,24 +117,24 @@ def get_safe_progress(current, total):
         return 0.0
     return min(max(current / total, 0.0), 1.0)
 
-@st.cache_resource
-def load_model():
-    return pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
-
-classifier = load_model()
-
 os.makedirs("results", exist_ok=True)
 
 # Load cue words from Excel
-df_cue = pd.read_excel("cue_words.xlsx")
+try:
+    df_cue = pd.read_excel("cue_words.xlsx")
+except FileNotFoundError:
+    st.error("Error: 'cue_words.xlsx' not found. Please ensure the file is in the correct directory.")
+    st.stop()
 cue_words_by_block = {
     "Block_1": df_cue[df_cue["Block"] == "Block_1"]["Threatening Word"].dropna().tolist(),
     "Block_2": df_cue[df_cue["Block"] == "Block_2"]["Threatening Word"].dropna().tolist(),
     "Block_3": df_cue[df_cue["Block"] == "Block_3"]["Threatening Word"].dropna().tolist(),
     "Block_4": df_cue[df_cue["Block"] == "Block_4"]["Threatening Word"].dropna().tolist()
 }
+print("cue_words_by_block:", cue_words_by_block)
 for block in cue_words_by_block:
-    cue_words_by_block[block] = list(dict.fromkeys(cue_words_by_block[block]))  # Remove duplicates
+    print(f"{block}: {len(cue_words_by_block[block])} words")
+    cue_words_by_block[block] = list(dict.fromkeys(cue_words_by_block[block]))
 
 if "phase" not in st.session_state:
     st.session_state.user_id = ""
@@ -157,11 +162,11 @@ body {
 """, unsafe_allow_html=True)
 
 if st.session_state.phase == "Start":
-    st.title("Positive Phrase Intervention")
+    st.title("Word Association Task")
     st.markdown("""
-    Welcome to this four-level task designed to encourage positive associations with threatening words.
+    Welcome to this four-level task designed to collect word associations with threatening words.
 
-    - Respond to each threatening cue word with a single positive or neutral word.
+    - Respond to each threatening cue word with a single word.
     - Avoid repeats and generic prepositions.
     """)
     user_input = st.text_input("Enter your Name or Roll Number:")
@@ -180,7 +185,10 @@ if st.session_state.phase == "Start":
             st.session_state.phase = "Block_2" if st.session_state.step >= len(cue_words_by_block["Block_1"]) else "Block_1"
         else:
             st.session_state.phase = "Block_1"
-        st.session_state.current_cue = random.choice(cue_words_by_block[st.session_state.phase]) if st.session_state.phase != "Start" else None
+        if not cue_words_by_block[st.session_state.phase]:
+            st.error(f"No cue words available for {st.session_state.phase}. Please check the 'cue_words.xlsx' file.")
+            st.stop()
+        st.session_state.current_cue = random.choice(cue_words_by_block[st.session_state.phase])
         st.rerun()
 
 if st.session_state.phase in ["Block_1", "Block_2", "Block_3", "Block_4"]:
@@ -192,17 +200,23 @@ if st.session_state.phase in ["Block_1", "Block_2", "Block_3", "Block_4"]:
     # Display badges
     if len(st.session_state.used_texts) >= 10 and "10 Responses" not in st.session_state.badges:
         st.session_state.badges.append("10 Responses")
-        st.success("🏅 Badge Earned: 10 Positive Responses!")
+        st.success("🏅 Badge Earned: 10 Responses!")
     if st.session_state.step >= total_words and f"Level {level[-1]} Master" not in st.session_state.badges:
         st.session_state.badges.append(f"Level {level[-1]} Master")
         st.success(f"🏆 Badge Earned: Level {level[-1]} Master!")
 
     if st.session_state.step < total_words:
-        import random
         if st.session_state.current_cue is None or st.session_state.last_response_accepted:
             available_cues = [w for w in cue_words_by_block[level] if w not in [r["cue"] for r in st.session_state.responses if r["phase"] == level]]
             if not available_cues:
-                available_cues = cue_words_by_block[level]  # Reset if all used (for testing)
+                if level == "Block_4":
+                    st.session_state.phase = "End"
+                else:
+                    st.session_state.phase = f"Block_{int(level[-1]) + 1}"
+                    st.session_state.step = 0
+                    st.session_state.responses = []
+                st.rerun()
+                st.stop()
             st.session_state.current_cue = random.choice(available_cues)
             st.session_state.last_response_accepted = False
 
@@ -221,22 +235,14 @@ if st.session_state.phase in ["Block_1", "Block_2", "Block_3", "Block_4"]:
                     return
 
                 response_time = round(time.time() - st.session_state.start_time, 2)
-                result = classifier(phrase)[0]
-                label, conf = result['label'], result['score']
-                score = calculate_score(label)
+                print(f"Trial {st.session_state.step}: Cue={st.session_state.current_cue}, Response={phrase}, Time={response_time}")
 
                 # Spell check
                 misspelled = spell.unknown([phrase])
                 if misspelled:
                     suggestion = spell.correction(phrase)
-                    feedback.markdown(format_feedback(f"❌ Misspelled! Did you mean '{suggestion}'? Try again.", "#c0392b"), unsafe_allow_html=True)
-                    #time.sleep(2)
+                    feedback.markdown(format_feedback(f"❌ Please enter a valid word. Did you mean '{suggestion}'?", "#c0392b"), unsafe_allow_html=True)
                     return
-
-                # Fallback for specific cases
-                if phrase in ["hope", "peace", "strength"] and label == "NEGATIVE" and st.session_state.current_cue in ["Ridiculed", "Shame", "Rejected"]:
-                    label = "POSITIVE"
-                    conf = 0.9
 
                 entry = {
                     "timestamp": str(datetime.datetime.now()),
@@ -244,10 +250,7 @@ if st.session_state.phase in ["Block_1", "Block_2", "Block_3", "Block_4"]:
                     "specific_id": st.session_state.specific_id,
                     "phase": level,
                     "cue": st.session_state.current_cue,
-                    "sentence": "",
                     "response": phrase,
-                    "sentiment": label,
-                    "confidence": conf,
                     "score": 0,
                     "response_time_sec": response_time,
                     "accepted": False
@@ -255,33 +258,28 @@ if st.session_state.phase in ["Block_1", "Block_2", "Block_3", "Block_4"]:
 
                 if phrase in st.session_state.used_texts:
                     feedback.markdown(format_feedback("⚠️ Already used! Please try a different word.", "#e67e22"), unsafe_allow_html=True)
-                    #time.sleep(2)
                 elif not is_valid_response(phrase, st.session_state.current_cue):
-                    feedback.markdown(format_feedback("❌ Invalid input! Please enter a single word.", "#c0392b"), unsafe_allow_html=True)
-                    #time.sleep(2)
-                elif label == "NEGATIVE" or (label != "POSITIVE" and not any(pos in phrase for pos in ["hope", "peace", "strength"] if pos != st.session_state.current_cue.lower())):
-                    feedback.markdown(format_feedback("❌ Negative or unrelated! Try a positive/neutral word related to the cue.", "#c0392b"), unsafe_allow_html=True)
-                    #time.sleep(2)
+                    feedback.markdown(format_feedback("❌ Please enter a valid word.", "#c0392b"), unsafe_allow_html=True)
                 else:
-                    entry["score"] = score
+                    entry["score"] = calculate_score()
                     entry["accepted"] = True
-                    st.session_state.score += score
+                    st.session_state.score += entry["score"]
                     st.session_state.used_texts.add(phrase)
                     st.session_state.step += 1
                     st.session_state.last_response_accepted = True
-                    feedback.markdown(format_feedback(f"✅ Correct | Score +{score}", "#27ae60"), unsafe_allow_html=True)
-                    #time.sleep(2)
+                    # feedback.markdown(format_feedback(f"✅ Accepted | Score +{entry['score']}", "#27ae60"), unsafe_allow_html=True)  # Commented out as per design
 
                 st.session_state.responses.append(entry)
                 safe_id = re.sub(r'[^\w\-]', '_', st.session_state.user_id)
                 pd.DataFrame(st.session_state.responses).to_csv(f"results/{safe_id}.csv", index=False)
                 log_to_gsheet(entry)
-                st.session_state.start_time = None if entry["accepted"] else time.time()  # Reset only on failure
+                st.session_state.start_time = None if entry["accepted"] else time.time()
+
             except Exception as e:
                 feedback.markdown(format_feedback(f"❌ Error: {str(e)}. Please restart.", "#c0392b"), unsafe_allow_html=True)
                 st.session_state.start_time = time.time()
 
-        st.text_input(f"Type a single positive/neutral word related to '{st.session_state.current_cue}':", key=f"input_{st.session_state.step}", on_change=handle_input)
+        st.text_input(f"Type a single word related to '{st.session_state.current_cue}':", key=f"input_{st.session_state.step}", on_change=handle_input)
 
     else:
         st.success(f"🎉 Well done! You've done a great job finishing Level {level[-1]}!")
@@ -291,6 +289,7 @@ if st.session_state.phase in ["Block_1", "Block_2", "Block_3", "Block_4"]:
             next_level = f"Block_{int(level[-1]) + 1}"
             st.session_state.step = 0
             st.session_state.phase = next_level
+            st.session_state.responses = []  # Clear responses for the next block
         st.rerun()
 
 elif st.session_state.phase == "End":
@@ -301,19 +300,19 @@ elif st.session_state.phase == "End":
     st.dataframe(df)
 
     with st.expander("📊 Click to see Analytics Dashboard"):
-        st.subheader("AI Confidence Over Time")
+        st.subheader("Response Time Over Time")
         df["step"] = range(1, len(df) + 1)
         min_step, max_step = st.slider("Select step range:", int(df["step"].min()), int(df["step"].max()), (int(df["step"].min()), int(df["step"].max())))
         filtered_df = df[(df["step"] >= min_step) & (df["step"] <= max_step)]
 
-        # Chart.js for AI Confidence using st.components.v1.html
+        # Chart.js for Response Time
         chart_data = {
             "type": "line",
             "data": {
                 "labels": filtered_df["step"].tolist(),
                 "datasets": [{
-                    "label": "AI Confidence",
-                    "data": filtered_df["confidence"].tolist(),
+                    "label": "Response Time (seconds)",
+                    "data": filtered_df["response_time_sec"].tolist(),
                     "borderColor": "#27ae60",
                     "backgroundColor": "rgba(39, 174, 96, 0.2)",
                     "fill": True,
@@ -323,18 +322,18 @@ elif st.session_state.phase == "End":
             "options": {
                 "scales": {
                     "x": {"title": {"display": True, "text": "Step"}},
-                    "y": {"title": {"display": True, "text": "Confidence"}, "min": 0, "max": 1}
+                    "y": {"title": {"display": True, "text": "Response Time (seconds)"}, "min": 0}
                 },
                 "plugins": {
-                    "title": {"display": True, "text": "AI Confidence Over Time"}
+                    "title": {"display": True, "text": "Response Time Over Time"}
                 }
             }
         }
         chart_html = f"""
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-        <canvas id="confidenceChart"></canvas>
+        <canvas id="responseTimeChart"></canvas>
         <script>
-            const ctx = document.getElementById('confidenceChart').getContext('2d');
+            const ctx = document.getElementById('responseTimeChart').getContext('2d');
             new Chart(ctx, {json.dumps(chart_data)});
         </script>
         """
